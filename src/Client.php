@@ -2,7 +2,7 @@
 /**
  * This file is part of the art-of-wifi/unifi-api-client package
  *
- * This UniFi API client Class is based on the work done by the following developers:
+ * This UniFi API client class is based on the work done by the following developers:
  *    domwo: http://community.ubnt.com/t5/UniFi-Wireless/little-php-class-for-unifi-api/m-p/603051
  *    fbagnol: https://github.com/fbagnol/class.unifi.php
  * and the API as published by Ubiquiti:
@@ -17,7 +17,7 @@
 namespace UniFi_API;
 
 /**
- * the UniFi API client Class
+ * the UniFi API client class
  */
 class Client
 {
@@ -32,6 +32,8 @@ class Client
     protected $debug               = false;
     protected $is_loggedin         = false;
     protected $is_unifi_os         = false;
+    protected $exec_retries        = 0;
+    protected $class_version       = '1.1.56';
     private $cookies               = '';
     private $request_type          = 'GET';
     private $request_types_allowed = ['GET', 'POST', 'PUT', 'DELETE'];
@@ -42,16 +44,16 @@ class Client
     private $curl_ssl_verify_host  = false;
 
     /**
-     * Construct an instance of the UniFi API client Class
+     * Construct an instance of the UniFi API client class
      * ---------------------------------------------------
-     * return a new class instance
+     * returns a new class instance
      * required parameter <user>       = string; user name to use when connecting to the UniFi controller
      * required parameter <password>   = string; password to use when connecting to the UniFi controller
-     * optional parameter <baseurl>    = string; base URL of the UniFi controller which *must* include "https://" prefix,
+     * optional parameter <baseurl>    = string; base URL of the UniFi controller which *must* include 'https://'' prefix,
      *                                   a port suffix (e.g. :8443) is required for non-UniFi OS controllers,
-     *                                   do not add trailing slashes
-     * optional parameter <site>       = string; short site name to access, defaults to "default"
-     * optional parameter <version>    = string; the version number of the controller, defaults to "5.4.16"
+     *                                   do not add trailing slashes, defaults to 'https://127.0.0.1:8443'
+     * optional parameter <site>       = string; short site name to access, defaults to 'default'
+     * optional parameter <version>    = string; the version number of the controller
      * optional parameter <ssl_verify> = boolean; whether to validate the controller's SSL certificate or not, a value of true is
      *                                   recommended for production environments to prevent potential MitM attacks, default value (false)
      *                                   disables validation of the controller certificate
@@ -66,10 +68,12 @@ class Client
         $this->password = trim($password);
 
         if (!empty($baseurl)) {
+            $this->check_base_url($baseurl);
             $this->baseurl = trim($baseurl);
         }
 
         if (!empty($site)) {
+            $this->check_site($site);
             $this->site = trim($site);
         }
 
@@ -81,18 +85,14 @@ class Client
             $this->curl_ssl_verify_peer = true;
             $this->curl_ssl_verify_host = 2;
         }
-
-        $this->check_base_url();
-        $this->check_site($this->site);
     }
 
     /**
-     * This method is be called as soon as there are no other references to the Class instance
+     * This method is called as soon as there are no other references to the class instance
      * https://www.php.net/manual/en/language.oop5.decon.php
      *
      * NOTES:
-     * to force the Class instance to log out automatically upon destruct, simply call logout() or unset
-     * $_SESSION['unificookie'] at the end of your code
+     * to force the class instance to log out when you're done, simply call logout()
      */
     public function __destruct()
     {
@@ -132,13 +132,18 @@ class Client
         }
 
         /**
-         * first we check whether we have a "regular" controller or one based on UniFi OS
+         * first we check whether we have a "regular" controller or one based on UniFi OS,
+         * prepare cURL and options
          */
         $ch = $this->get_curl_resource();
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_NOBODY, true);
-        curl_setopt($ch, CURLOPT_URL, $this->baseurl . '/');
+        $curl_options = [
+            CURLOPT_HEADER => true,
+            CURLOPT_POST   => true,
+            CURLOPT_NOBODY => true,
+            CURLOPT_URL    => $this->baseurl . '/',
+        ];
+
+        curl_setopt_array($ch, $curl_options);
 
         /**
          * execute the cURL request and get the HTTP response code
@@ -150,18 +155,25 @@ class Client
             trigger_error('cURL error: ' . curl_error($ch));
         }
 
+        /**
+         * we now proceed with the actual login
+         */
+        $curl_options = [
+            CURLOPT_NOBODY     => false,
+            CURLOPT_POSTFIELDS => json_encode(['username' => $this->user, 'password' => $this->password]),
+            CURLOPT_HTTPHEADER => ['content-type: application/json; charset=utf-8']
+        ];
+
         if ($http_code === 200) {
-            $this->is_unifi_os = true;
-            curl_setopt($ch, CURLOPT_REFERER, $this->baseurl . '/login');
-            curl_setopt($ch, CURLOPT_URL, $this->baseurl . '/api/auth/login');
+            $this->is_unifi_os             = true;
+            $curl_options[CURLOPT_REFERER] = $this->baseurl . '/login';
+            $curl_options[CURLOPT_URL]     = $this->baseurl . '/api/auth/login';
         } else {
-            curl_setopt($ch, CURLOPT_REFERER, $this->baseurl . '/login');
-            curl_setopt($ch, CURLOPT_URL, $this->baseurl . '/api/login');
+            $curl_options[CURLOPT_REFERER] = $this->baseurl . '/login';
+            $curl_options[CURLOPT_URL]     = $this->baseurl . '/api/login';
         }
 
-        curl_setopt($ch, CURLOPT_NOBODY, false);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['username' => $this->user, 'password' => $this->password]));
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['content-type: application/json; charset=utf-8']);
+        curl_setopt_array($ch, $curl_options);
 
         /**
          * execute the cURL request and get the HTTP response code
@@ -233,16 +245,14 @@ class Client
      */
     public function logout()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         /**
-         * prepare cURL
+         * prepare cURL and options
          */
         $ch = $this->get_curl_resource();
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
+        $curl_options = [
+            CURLOPT_HEADER => true,
+            CURLOPT_POST   => true
+        ];
 
         /**
          * constuct HTTP request headers as required
@@ -250,7 +260,7 @@ class Client
         $headers = ['Content-Length: 0'];
         if ($this->is_unifi_os) {
             $logout_path = '/api/auth/logout';
-            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+            $curl_options[CURLOPT_CUSTOMREQUEST] = 'POST';
 
             $csrf_token = $this->extract_csrf_token_from_cookie();
             if ($csrf_token) {
@@ -260,8 +270,10 @@ class Client
             $logout_path = '/logout';
         }
 
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_URL, $this->baseurl . $logout_path);
+        $curl_options[CURLOPT_HTTPHEADER] = $headers;
+        $curl_options[CURLOPT_URL]        = $this->baseurl . $logout_path;
+
+        curl_setopt_array($ch, $curl_options);
 
         /**
          * execute the cURL request to logout
@@ -297,10 +309,6 @@ class Client
      */
     public function authorize_guest($mac, $minutes, $up = null, $down = null, $MBytes = null, $ap_mac = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = ['cmd' => 'authorize-guest', 'mac' => strtolower($mac), 'minutes' => intval($minutes)];
 
         /**
@@ -322,9 +330,7 @@ class Client
             $payload['ap_mac'] = strtolower($ap_mac);
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/stamgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/stamgr', $payload);
     }
 
     /**
@@ -335,14 +341,9 @@ class Client
      */
     public function unauthorize_guest($mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'unauthorize-guest', 'mac' => strtolower($mac)];
 
-        $payload  = ['cmd' => 'unauthorize-guest', 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/stamgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/stamgr', $payload);
     }
 
     /**
@@ -353,14 +354,9 @@ class Client
      */
     public function reconnect_sta($mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'kick-sta', 'mac' => strtolower($mac)];
 
-        $payload  = ['cmd' => 'kick-sta', 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/stamgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/stamgr', $payload);
     }
 
     /**
@@ -371,14 +367,9 @@ class Client
      */
     public function block_sta($mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'block-sta', 'mac' => strtolower($mac)];
 
-        $payload  = ['cmd' => 'block-sta', 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/stamgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/stamgr', $payload);
     }
 
     /**
@@ -389,14 +380,9 @@ class Client
      */
     public function unblock_sta($mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'unblock-sta', 'mac' => strtolower($mac)];
 
-        $payload  = ['cmd' => 'unblock-sta', 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/stamgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/stamgr', $payload);
     }
 
     /**
@@ -411,15 +397,9 @@ class Client
      */
     public function forget_sta($macs)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'forget-sta', 'macs' => array_map('strtolower', $macs)];
 
-        $macs     = array_map('strtolower', $macs);
-        $payload  = ['cmd' => 'forget-sta', 'macs' => $macs];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/stamgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/stamgr', $payload);
     }
 
     /**
@@ -436,10 +416,6 @@ class Client
      */
     public function create_user($mac, $user_group_id, $name = null, $note = null, $is_guest = null, $is_wired = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $new_user = ['mac' => strtolower($mac), 'usergroup_id' => $user_group_id];
         if (!is_null($name)) {
             $new_user['name'] = $name;
@@ -458,10 +434,9 @@ class Client
             $new_user['is_wired'] = $is_wired;
         }
 
-        $payload  = ['objects' => [['data' => $new_user]]];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/group/user', $payload);
+        $payload = ['objects' => [['data' => $new_user]]];
 
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/group/user', $payload);
     }
 
     /**
@@ -476,15 +451,10 @@ class Client
      */
     public function set_sta_note($user_id, $note = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $noted   = is_null($note) || empty($note) ? false : true;
+        $payload = ['note' => $note, 'noted' => $noted];
 
-        $noted    = (is_null($note)) || (empty($note)) ? false : true;
-        $payload  = ['note' => $note, 'noted' => $noted];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/upd/user/' . trim($user_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/upd/user/' . trim($user_id), $payload);
     }
 
     /**
@@ -499,14 +469,9 @@ class Client
      */
     public function set_sta_name($user_id, $name = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['name' => $name];
 
-        $payload  = ['name' => $name];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/upd/user/' . trim($user_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/upd/user/' . trim($user_id), $payload);
     }
 
     /**
@@ -524,13 +489,9 @@ class Client
      */
     public function stat_5minutes_site($start = null, $end = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $end        = is_null($end) ? (time() * 1000) : intval($end);
-        $start      = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
-        $attributes = [
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
+        $attribs = [
             'bytes',
             'wan-tx_bytes',
             'wan-rx_bytes',
@@ -540,10 +501,9 @@ class Client
             'wlan-num_sta',
             'time'
         ];
-        $payload  = ['attrs' => $attributes, 'start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/5minutes.site', $payload);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
 
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/5minutes.site', $payload);
     }
 
     /**
@@ -559,13 +519,9 @@ class Client
      */
     public function stat_hourly_site($start = null, $end = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $end        = is_null($end) ? (time() * 1000) : intval($end);
-        $start      = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
-        $attributes = [
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = [
             'bytes',
             'wan-tx_bytes',
             'wan-rx_bytes',
@@ -575,10 +531,9 @@ class Client
             'wlan-num_sta',
             'time'
         ];
-        $payload  = ['attrs' => $attributes, 'start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/hourly.site', $payload);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
 
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/hourly.site', $payload);
     }
 
     /**
@@ -594,13 +549,9 @@ class Client
      */
     public function stat_daily_site($start = null, $end = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $end        = is_null($end) ? ((time() - (time() % 3600)) * 1000) : intval($end);
-        $start      = is_null($start) ? $end - (52 * 7 * 24 * 3600 * 1000) : intval($start);
-        $attributes = [
+        $end     = is_null($end) ? (time() - (time() % 3600)) * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (52 * 7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = [
             'bytes',
             'wan-tx_bytes',
             'wan-rx_bytes',
@@ -610,10 +561,9 @@ class Client
             'wlan-num_sta',
             'time'
         ];
-        $payload  = ['attrs' => $attributes, 'start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/daily.site', $payload);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
 
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/daily.site', $payload);
     }
 
     /**
@@ -632,21 +582,15 @@ class Client
      */
     public function stat_5minutes_aps($start = null, $end = null, $mac = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $end        = is_null($end) ? (time() * 1000) : intval($end);
-        $start      = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
-        $attributes = ['bytes', 'num_sta', 'time'];
-        $payload = ['attrs' => $attributes, 'start' => $start, 'end' => $end];
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
+        $attribs = ['bytes', 'num_sta', 'time'];
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
         if (!is_null($mac)) {
             $payload['mac'] = strtolower($mac);
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/5minutes.ap', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/5minutes.ap', $payload);
     }
 
     /**
@@ -663,21 +607,15 @@ class Client
      */
     public function stat_hourly_aps($start = null, $end = null, $mac = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $end        = is_null($end) ? (time() * 1000) : intval($end);
-        $start      = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
-        $attributes = ['bytes', 'num_sta', 'time'];
-        $payload = ['attrs' => $attributes, 'start' => $start, 'end' => $end];
+        $end     = is_null($end) ? (time() * 1000) : intval($end);
+        $start   = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = ['bytes', 'num_sta', 'time'];
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
         if (!is_null($mac)) {
             $payload['mac'] = strtolower($mac);
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/hourly.ap', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/hourly.ap', $payload);
     }
 
     /**
@@ -694,21 +632,15 @@ class Client
      */
     public function stat_daily_aps($start = null, $end = null, $mac = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $end        = is_null($end) ? (time() * 1000) : intval($end);
-        $start      = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
-        $attributes = ['bytes', 'num_sta', 'time'];
-        $payload = ['attrs' => $attributes, 'start' => $start, 'end' => $end];
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = ['bytes', 'num_sta', 'time'];
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
         if (!is_null($mac)) {
             $payload['mac'] = strtolower($mac);
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/daily.ap', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/daily.ap', $payload);
     }
 
     /**
@@ -731,17 +663,12 @@ class Client
      */
     public function stat_5minutes_user($mac, $start = null, $end = null, $attribs = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
+        $attribs = is_null($attribs) ? ['time', 'rx_bytes', 'tx_bytes'] : array_merge(['time'], $attribs);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end, 'mac' => strtolower($mac)];
 
-        $end      = is_null($end) ? (time() * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
-        $attribs  = is_null($attribs) ? ['time', 'rx_bytes', 'tx_bytes'] : array_merge(['time'], $attribs);
-        $payload  = ['attrs' => $attribs, 'start' => $start, 'end' => $end, 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/5minutes.user', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/5minutes.user', $payload);
     }
 
     /**
@@ -762,17 +689,12 @@ class Client
      */
     public function stat_hourly_user($mac, $start = null, $end = null, $attribs = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = is_null($attribs) ? ['time', 'rx_bytes', 'tx_bytes'] : array_merge(['time'], $attribs);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end, 'mac' => strtolower($mac)];
 
-        $end      = is_null($end) ? (time() * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
-        $attribs  = is_null($attribs) ? ['time', 'rx_bytes', 'tx_bytes'] : array_merge(['time'], $attribs);
-        $payload  = ['attrs' => $attribs, 'start' => $start, 'end' => $end, 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/hourly.user', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/hourly.user', $payload);
     }
 
     /**
@@ -793,22 +715,17 @@ class Client
      */
     public function stat_daily_user($mac, $start = null, $end = null, $attribs = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = is_null($attribs) ? ['time', 'rx_bytes', 'tx_bytes'] : array_merge(['time'], $attribs);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end, 'mac' => strtolower($mac)];
 
-        $end      = is_null($end) ? (time() * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
-        $attribs  = is_null($attribs) ? ['time', 'rx_bytes', 'tx_bytes'] : array_merge(['time'], $attribs);
-        $payload  = ['attrs' => $attribs, 'start' => $start, 'end' => $end, 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/daily.user', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/daily.user', $payload);
     }
 
     /**
      * 5 minutes gateway stats method
-     * -------------------------------
+     * ------------------------------
      * returns an array of 5-minute stats objects for the gateway belonging to the current site
      * optional parameter <start> = Unix timestamp in milliseconds
      * optional parameter <end>   = Unix timestamp in milliseconds
@@ -826,22 +743,17 @@ class Client
      */
     public function stat_5minutes_gateway($start = null, $end = null, $attribs = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
+        $attribs = is_null($attribs) ? ['time', 'mem', 'cpu', 'loadavg_5'] : array_merge(['time'], $attribs);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
 
-        $end      = is_null($end) ? (time() * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (12 * 3600 * 1000) : intval($start);
-        $attribs  = is_null($attribs) ? ['time', 'mem', 'cpu', 'loadavg_5'] : array_merge(['time'], $attribs);
-        $payload  = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/5minutes.gw', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/5minutes.gw', $payload);
     }
 
     /**
      * Hourly gateway stats method
-     * ----------------------------
+     * ---------------------------
      * returns an array of hourly stats objects for the gateway belonging to the current site
      * optional parameter <start> = Unix timestamp in milliseconds
      * optional parameter <end>   = Unix timestamp in milliseconds
@@ -856,22 +768,17 @@ class Client
      */
     public function stat_hourly_gateway($start = null, $end = null, $attribs = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = is_null($attribs) ? ['time', 'mem', 'cpu', 'loadavg_5'] : array_merge(['time'], $attribs);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
 
-        $end      = is_null($end) ? (time() * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (7 * 24 * 3600 * 1000) : intval($start);
-        $attribs  = is_null($attribs) ? ['time', 'mem', 'cpu', 'loadavg_5'] : array_merge(['time'], $attribs);
-        $payload  = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/hourly.gw', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/hourly.gw', $payload);
     }
 
     /**
      * Daily gateway stats method
-     * ---------------------------
+     * --------------------------
      * returns an array of daily stats objects for the gateway belonging to the current site
      * optional parameter <start> = Unix timestamp in milliseconds
      * optional parameter <end>   = Unix timestamp in milliseconds
@@ -886,17 +793,12 @@ class Client
      */
     public function stat_daily_gateway($start = null, $end = null, $attribs = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? (time() - (time() % 3600)) * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (52 * 7 * 24 * 3600 * 1000) : intval($start);
+        $attribs = is_null($attribs) ? ['time', 'mem', 'cpu', 'loadavg_5'] : array_merge(['time'], $attribs);
+        $payload = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
 
-        $end      = is_null($end) ? ((time() - (time() % 3600)) * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (52 * 7 * 24 * 3600 * 1000) : intval($start);
-        $attribs  = is_null($attribs) ? ['time', 'mem', 'cpu', 'loadavg_5'] : array_merge(['time'], $attribs);
-        $payload  = ['attrs' => $attribs, 'start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/daily.gw', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/daily.gw', $payload);
     }
 
     /**
@@ -912,21 +814,16 @@ class Client
      */
     public function stat_speedtest_results($start = null, $end = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (24 * 3600 * 1000) : intval($start);
+        $payload = ['attrs' => ['xput_download', 'xput_upload', 'latency', 'time'], 'start' => $start, 'end' => $end];
 
-        $end      = is_null($end) ? (time() * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (24 * 3600 * 1000) : intval($start);
-        $payload  = ['attrs' => ['xput_download', 'xput_upload', 'latency', 'time'], 'start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/report/archive.speedtest', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/report/archive.speedtest', $payload);
     }
 
     /**
      * Method to fetch IPS/IDS event
-     * ----------------------------------
+     * -----------------------------
      * returns an array of IPS/IDS event objects
      * optional parameter <start> = Unix timestamp in milliseconds
      * optional parameter <end>   = Unix timestamp in milliseconds
@@ -939,17 +836,12 @@ class Client
      */
     public function stat_ips_events($start = null, $end = null, $limit = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() * 1000 : intval($end);
+        $start   = is_null($start) ? $end - (24 * 3600 * 1000) : intval($start);
+        $limit   = is_null($limit) ? 10000 : intval($limit);
+        $payload = ['start' => $start, 'end' => $end, '_limit' => $limit];
 
-        $end      = is_null($end) ? (time() * 1000) : intval($end);
-        $start    = is_null($start) ? $end - (24 * 3600 * 1000) : intval($start);
-        $limit    = is_null($limit) ? 10000 : intval($limit);
-        $payload  = ['start' => $start, 'end' => $end, '_limit' => $limit];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/ips/event', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/ips/event', $payload);
     }
 
     /**
@@ -966,10 +858,6 @@ class Client
      */
     public function stat_sessions($start = null, $end = null, $mac = null, $type = 'all')
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!in_array($type, ['all', 'guest', 'user'])) {
             return false;
         }
@@ -981,9 +869,7 @@ class Client
             $payload['mac'] = strtolower($mac);
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/session', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/session', $payload);
     }
 
     /**
@@ -995,15 +881,10 @@ class Client
      */
     public function stat_sta_sessions_latest($mac, $limit = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $limit   = is_null($limit) ? 5 : intval($limit);
+        $payload = ['mac' => strtolower($mac), '_limit' => $limit, '_sort'=> '-assoc_time'];
 
-        $limit    = is_null($limit) ? 5 : intval($limit);
-        $payload  = ['mac' => strtolower($mac), '_limit' => $limit, '_sort'=> '-assoc_time'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/session', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/session', $payload);
     }
 
     /**
@@ -1018,16 +899,11 @@ class Client
      */
     public function stat_auths($start = null, $end = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $end     = is_null($end) ? time() : intval($end);
+        $start   = is_null($start) ? $end - (7 * 24 * 3600) : intval($start);
+        $payload = ['start' => $start, 'end' => $end];
 
-        $end      = is_null($end) ? time() : intval($end);
-        $start    = is_null($start) ? $end - (7 * 24 * 3600) : intval($start);
-        $payload  = ['start' => $start, 'end' => $end];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/authorization', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/authorization', $payload);
     }
 
     /**
@@ -1042,14 +918,9 @@ class Client
      */
     public function stat_allusers($historyhours = 8760)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['type' => 'all', 'conn' => 'all', 'within' => intval($historyhours)];
 
-        $payload  = ['type' => 'all', 'conn' => 'all', 'within' => intval($historyhours)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/alluser', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/alluser', $payload);
     }
 
     /**
@@ -1060,14 +931,9 @@ class Client
      */
     public function list_guests($within = 8760)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['within' => intval($within)];
 
-        $payload  = ['within' => intval($within)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/guest', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/guest', $payload);
     }
 
     /**
@@ -1078,13 +944,7 @@ class Client
      */
     public function list_clients($client_mac = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/sta/' . strtolower(trim($client_mac)));
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/sta/' . strtolower(trim($client_mac)));
     }
 
     /**
@@ -1095,13 +955,7 @@ class Client
      */
     public function stat_client($client_mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/user/' . strtolower(trim($client_mac)));
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/user/' . strtolower(trim($client_mac)));
     }
 
     /**
@@ -1113,14 +967,9 @@ class Client
      */
     public function set_usergroup($user_id, $group_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['usergroup_id' => $group_id];
 
-        $payload  = ['usergroup_id' => $group_id];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/upd/user/' . trim($user_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/upd/user/' . trim($user_id), $payload);
     }
 
     /**
@@ -1135,10 +984,6 @@ class Client
      */
     public function edit_client_fixedip($client_id, $use_fixedip, $network_id = null, $fixed_ip = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!is_bool($use_fixedip)) {
             return false;
         }
@@ -1155,9 +1000,7 @@ class Client
             }
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/user/' . trim($client_id), $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/user/' . trim($client_id), $payload);
     }
 
     /**
@@ -1167,13 +1010,7 @@ class Client
      */
     public function list_usergroups()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/usergroup');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/usergroup');
     }
 
     /**
@@ -1186,14 +1023,9 @@ class Client
      */
     public function create_usergroup($group_name, $group_dn = -1, $group_up = -1)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['name' => $group_name, 'qos_rate_max_down' => intval($group_dn), 'qos_rate_max_up' => intval($group_up)];
 
-        $payload  = ['name' => $group_name, 'qos_rate_max_down' => intval($group_dn), 'qos_rate_max_up' => intval($group_up)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/usergroup', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/usergroup', $payload);
     }
 
     /**
@@ -1208,10 +1040,6 @@ class Client
      */
     public function edit_usergroup($group_id, $site_id, $group_name, $group_dn = -1, $group_up = -1)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
         $payload = [
             '_id'               => $group_id,
@@ -1221,9 +1049,7 @@ class Client
             'site_id'           => $site_id
         ];
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/usergroup/' . trim($group_id), $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/usergroup/' . trim($group_id), $payload);
     }
 
     /**
@@ -1234,31 +1060,20 @@ class Client
      */
     public function delete_usergroup($group_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'DELETE';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/usergroup/' . trim($group_id));
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/usergroup/' . trim($group_id));
     }
 
     /**
      * List firewall groups (using REST)
-     * ----------------------------------
+     * ---------------------------------
      * returns an array containing the current firewall groups or the selected firewall group on success
      * optional parameter <group_id> = _id value of the single firewall group to list
      */
     public function list_firewallgroups($group_id = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id));
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id));
     }
 
     /**
@@ -1272,18 +1087,13 @@ class Client
      */
     public function create_firewallgroup($group_name, $group_type, $group_members = [])
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!in_array($group_type, ['address-group', 'ipv6-address-group', 'port-group'])) {
             return false;
         }
 
-        $payload            = ['name' => $group_name, 'group_type' => $group_type, 'group_members' => $group_members];
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/firewallgroup', $payload);
+        $payload = ['name' => $group_name, 'group_type' => $group_type, 'group_members' => $group_members];
 
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/firewallgroup', $payload);
     }
 
     /**
@@ -1302,10 +1112,6 @@ class Client
      */
     public function edit_firewallgroup($group_id, $site_id, $group_name, $group_type, $group_members = [])
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!in_array($group_type, ['address-group', 'ipv6-address-group', 'port-group'])) {
             return false;
         }
@@ -1319,9 +1125,7 @@ class Client
             'site_id'       => $site_id
         ];
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id), $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id), $payload);
     }
 
     /**
@@ -1332,30 +1136,30 @@ class Client
      */
     public function delete_firewallgroup($group_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'DELETE';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id));
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id));
     }
 
     /**
      * List firewall rules (using REST)
-     * ----------------------------------
+     * --------------------------------
      * returns an array containing the current firewall rules on success
      */
     public function list_firewallrules()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/firewallrule');
+    }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/firewallrule');
-
-        return $this->process_response($response);
+    /**
+     * List static routing settings (using REST)
+     * -----------------------------------------
+     * returns an array of static routes and their settings
+     * optional parameter <route_id> = string; _id value of the static route to get settings for
+     */
+    public function list_routing($route_id = '')
+    {
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/routing/' . trim($route_id));
     }
 
     /**
@@ -1365,13 +1169,7 @@ class Client
      */
     public function list_health()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/health');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/health');
     }
 
     /**
@@ -1383,14 +1181,9 @@ class Client
      */
     public function list_dashboard($five_minutes = false)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $path_suffix = $five_minutes ? '?scale=5minutes' : null;
 
-        $url_suffix = $five_minutes ? '?scale=5minutes' : null;
-        $response   = $this->exec_curl('/api/s/' . $this->site . '/stat/dashboard' . $url_suffix);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/dashboard' . $path_suffix);
     }
 
     /**
@@ -1400,13 +1193,7 @@ class Client
      */
     public function list_users()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/user');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/user');
     }
 
     /**
@@ -1417,13 +1204,7 @@ class Client
      */
     public function list_devices($device_mac = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/device/' . strtolower(trim($device_mac)));
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/device/' . strtolower(trim($device_mac)));
     }
 
     /**
@@ -1435,13 +1216,7 @@ class Client
      */
     public function list_tags()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/tag');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/tag');
     }
 
     /**
@@ -1452,14 +1227,9 @@ class Client
      */
     public function list_rogueaps($within = 24)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['within' => intval($within)];
 
-        $payload  = ['within' => intval($within)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/rogueap', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/rogueap', $payload);
     }
 
     /**
@@ -1469,13 +1239,7 @@ class Client
      */
     public function list_known_rogueaps()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/rogueknown');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/rogueknown');
     }
 
     /**
@@ -1489,14 +1253,9 @@ class Client
      */
     public function generate_backup()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'backup'];
 
-        $payload  = ['cmd' => 'backup'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/backup', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/cmd/backup', $payload);
     }
 
     /**
@@ -1506,14 +1265,9 @@ class Client
      */
     public function list_backups()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'list-backups'];
 
-        $payload  = ['cmd' => 'list-backups'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/backup', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/cmd/backup', $payload);
     }
 
     /**
@@ -1523,13 +1277,7 @@ class Client
      */
     public function list_sites()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/self/sites');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/self/sites');
     }
 
     /**
@@ -1541,13 +1289,7 @@ class Client
      */
     public function stat_sites()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/stat/sites');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/stat/sites');
     }
 
     /**
@@ -1560,14 +1302,9 @@ class Client
      */
     public function create_site($description)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['desc' => $description, 'cmd' => 'add-site'];
 
-        $payload  = ['desc' => $description, 'cmd' => 'add-site'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -1578,14 +1315,9 @@ class Client
      */
     public function delete_site($site_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['site' => $site_id, 'cmd' => 'delete-site'];
 
-        $payload  = ['site' => $site_id, 'cmd' => 'delete-site'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -1598,14 +1330,9 @@ class Client
      */
     public function set_site_name($site_name)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'update-site', 'desc' => $site_name];
 
-        $payload  = ['cmd' => 'update-site', 'desc' => $site_name];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -1619,14 +1346,9 @@ class Client
      */
     public function set_site_country($country_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/setting/country/' . trim($country_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/country/' . trim($country_id), $payload);
     }
 
     /**
@@ -1639,14 +1361,9 @@ class Client
      */
     public function set_site_locale($locale_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/setting/locale/' . trim($locale_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/locale/' . trim($locale_id), $payload);
     }
 
     /**
@@ -1659,14 +1376,9 @@ class Client
      */
     public function set_site_snmp($snmp_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/setting/snmp/' . trim($snmp_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/snmp/' . trim($snmp_id), $payload);
     }
 
     /**
@@ -1679,14 +1391,9 @@ class Client
      */
     public function set_site_mgmt($mgmt_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/setting/mgmt/' . trim($mgmt_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/mgmt/' . trim($mgmt_id), $payload);
     }
 
     /**
@@ -1699,14 +1406,9 @@ class Client
      */
     public function set_site_guest_access($guest_access_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/setting/guest_access/' . trim($guest_access_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/guest_access/' . trim($guest_access_id), $payload);
     }
 
     /**
@@ -1719,14 +1421,9 @@ class Client
      */
     public function set_site_ntp($ntp_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/setting/ntp/' . trim($ntp_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/ntp/' . trim($ntp_id), $payload);
     }
 
     /**
@@ -1739,14 +1436,9 @@ class Client
      */
     public function set_site_connectivity($connectivity_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/setting/connectivity/' . trim($connectivity_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/connectivity/' . trim($connectivity_id), $payload);
     }
 
     /**
@@ -1756,14 +1448,9 @@ class Client
      */
     public function list_admins()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'get-admins'];
 
-        $payload  = ['cmd' => 'get-admins'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -1773,13 +1460,7 @@ class Client
      */
     public function list_all_admins()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/stat/admin');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/stat/admin');
     }
 
     /**
@@ -1807,15 +1488,11 @@ class Client
     public function invite_admin(
         $name,
         $email,
-        $enable_sso = true,
-        $readonly = false,
-        $device_adopt = false,
+        $enable_sso     = true,
+        $readonly       = false,
+        $device_adopt   = false,
         $device_restart = false
     ) {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $email_valid = filter_var(trim($email), FILTER_VALIDATE_EMAIL);
         if (!$email_valid) {
             trigger_error('The email address provided is invalid!');
@@ -1823,25 +1500,28 @@ class Client
             return false;
         }
 
-        $permissions = [];
-        $payload     = ['name' => trim($name), 'email' => trim($email), 'for_sso' => $enable_sso, 'cmd' => 'invite-admin', 'role' => 'admin'];
+        $payload= [
+            'name'        => trim($name),
+            'email'       => trim($email),
+            'for_sso'     => $enable_sso,
+            'cmd'         => 'invite-admin',
+            'role'        => 'admin',
+            'permissions' => []
+        ];
 
         if ($readonly) {
             $payload['role'] = 'readonly';
         }
 
         if ($device_adopt) {
-            $permissions[] = 'API_DEVICE_ADOPT';
+            $payload['permissions'][] = 'API_DEVICE_ADOPT';
         }
 
         if ($device_restart) {
-            $permissions[] = 'API_DEVICE_RESTART';
+            $payload['permissions'][] = 'API_DEVICE_RESTART';
         }
 
-        $payload['permissions'] = $permissions;
-        $response               = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -1862,29 +1542,26 @@ class Client
      */
     public function assign_existing_admin($admin_id, $readonly = false, $device_adopt = false, $device_restart = false)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $permissions = [];
-        $payload     = ['cmd' => 'grant-admin', 'admin' => trim($admin_id), 'role' => 'admin'];
+        $payload = [
+            'cmd'         => 'grant-admin',
+            'admin'       => trim($admin_id),
+            'role'        => 'admin',
+            'permissions' => []
+        ];
 
         if ($readonly) {
             $payload['role'] = 'readonly';
         }
 
         if ($device_adopt) {
-            $permissions[] = 'API_DEVICE_ADOPT';
+            $payload['permissions'][] = 'API_DEVICE_ADOPT';
         }
 
         if ($device_restart) {
-            $permissions[] = 'API_DEVICE_RESTART';
+            $payload['permissions'][] = 'API_DEVICE_RESTART';
         }
 
-        $payload['permissions'] = $permissions;
-        $response               = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -1899,14 +1576,9 @@ class Client
      */
     public function revoke_admin($admin_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'revoke-admin', 'admin' => $admin_id];
 
-        $payload  = ['cmd' => 'revoke-admin', 'admin' => $admin_id];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -1916,13 +1588,7 @@ class Client
      */
     public function list_wlan_groups()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/wlangroup');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/wlangroup');
     }
 
     /**
@@ -1932,13 +1598,7 @@ class Client
      */
     public function stat_sysinfo()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/sysinfo');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/sysinfo');
     }
 
     /**
@@ -1951,9 +1611,7 @@ class Client
      */
     public function stat_status()
     {
-        $response = $this->exec_curl('/status');
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/status', null, false);
     }
 
     /**
@@ -1963,13 +1621,7 @@ class Client
      */
     public function list_self()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/self');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/self');
     }
 
     /**
@@ -1980,14 +1632,9 @@ class Client
      */
     public function stat_voucher($create_time = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = trim($create_time) != null ? ['create_time' => intval($create_time)] : [];
 
-        $payload  = (trim($create_time) != null) ? ['create_time' => intval($create_time)] : [];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/voucher', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/voucher', $payload);
     }
 
     /**
@@ -1998,14 +1645,9 @@ class Client
      */
     public function stat_payment($within = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $path_suffix = $within != null ? '?within=' . intval($within) : '';
 
-        $url_suffix = (($within != null) ? '?within=' . intval($within) : '');
-        $response   = $this->exec_curl('/api/s/' . $this->site . '/stat/payment' . $url_suffix);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/payment' . $path_suffix);
     }
 
     /**
@@ -2018,17 +1660,12 @@ class Client
      */
     public function create_hotspotop($name, $x_password, $note = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = ['name' => $name, 'x_password' => $x_password];
         if (isset($note)) {
             $payload['note'] = trim($note);
         }
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/hotspotop', $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/hotspotop', $payload);
     }
 
     /**
@@ -2038,13 +1675,7 @@ class Client
      */
     public function list_hotspotop()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/hotspotop');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/hotspotop');
     }
 
     /**
@@ -2071,10 +1702,6 @@ class Client
         $down   = null,
         $MBytes = null
     ) {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = [
             'cmd'    => 'create-voucher',
             'expire' => intval($minutes),
@@ -2098,9 +1725,7 @@ class Client
             $payload['bytes'] = intval($MBytes);
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/hotspot', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/cmd/hotspot', $payload);
     }
 
     /**
@@ -2111,14 +1736,9 @@ class Client
      */
     public function revoke_voucher($voucher_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['_id' => $voucher_id, 'cmd' => 'delete-voucher'];
 
-        $payload  = ['_id' => $voucher_id, 'cmd' => 'delete-voucher'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/hotspot', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/hotspot', $payload);
     }
 
     /**
@@ -2129,14 +1749,9 @@ class Client
      */
     public function extend_guest_validity($guest_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['_id' => $guest_id, 'cmd' => 'extend'];
 
-        $payload  = ['_id' => $guest_id, 'cmd' => 'extend'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/hotspot', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/hotspot', $payload);
     }
 
     /**
@@ -2146,13 +1761,7 @@ class Client
      */
     public function list_portforward_stats()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/portforward');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/portforward');
     }
 
     /**
@@ -2162,13 +1771,7 @@ class Client
      */
     public function list_dpi_stats()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/dpi');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/dpi');
     }
 
     /**
@@ -2182,7 +1785,7 @@ class Client
      */
     public function list_dpi_stats_filtered($type = 'by_cat', $cat_filter = null)
     {
-        if (!$this->is_loggedin || !in_array($type, ['by_cat', 'by_app'])) {
+        if (!in_array($type, ['by_cat', 'by_app'])) {
             return false;
         }
 
@@ -2192,9 +1795,7 @@ class Client
             $payload['cats'] = $cat_filter;
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/sitedpi', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/sitedpi', $payload);
     }
 
     /**
@@ -2204,13 +1805,7 @@ class Client
      */
     public function list_current_channels()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/current-channel');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/current-channel');
     }
 
     /**
@@ -2224,13 +1819,7 @@ class Client
      */
     public function list_country_codes()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/ccode');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/ccode');
     }
 
     /**
@@ -2240,13 +1829,7 @@ class Client
      */
     public function list_portforwarding()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/portforward');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/portforward');
     }
 
     /**
@@ -2256,13 +1839,7 @@ class Client
      */
     public function list_dynamicdns()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/dynamicdns');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/dynamicdns');
     }
 
     /**
@@ -2272,13 +1849,7 @@ class Client
      */
     public function list_portconf()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/portconf');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/portconf');
     }
 
     /**
@@ -2288,13 +1859,7 @@ class Client
      */
     public function list_extension()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/extension');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/extension');
     }
 
     /**
@@ -2304,13 +1869,7 @@ class Client
      */
     public function list_settings()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/get/setting');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/get/setting');
     }
 
     /**
@@ -2321,14 +1880,9 @@ class Client
      */
     public function adopt_device($mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['mac' => strtolower($mac), 'cmd' => 'adopt'];
 
-        $payload  = ['mac' => strtolower($mac), 'cmd' => 'adopt'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
     }
 
     /**
@@ -2344,18 +1898,12 @@ class Client
      */
     public function restart_device($mac, $type = 'soft')
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = ['cmd' => 'restart', 'mac' => strtolower($mac)];
         if (!is_null($type) && in_array($type, ['soft', 'hard'])) {
             $payload['type'] = strtolower($type);
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
     }
 
     /**
@@ -2366,15 +1914,10 @@ class Client
      */
     public function force_provision($mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $payload  = ['mac' => strtolower($mac), 'cmd' => 'force-provision'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
+        $payload = ['mac' => strtolower($mac), 'cmd' => 'force-provision'];
 
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
     }
 
     /**
@@ -2386,14 +1929,9 @@ class Client
      */
     public function reboot_cloudkey()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'reboot'];
 
-        $payload  = ['cmd' => 'reboot'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/system', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/system', $payload);
     }
 
     /**
@@ -2410,19 +1948,14 @@ class Client
      */
     public function disable_ap($ap_id, $disable)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!is_bool($disable)) {
             return false;
         }
 
         $this->request_type = 'PUT';
         $payload            = ['disabled' => $disable];
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/device/' . trim($ap_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/device/' . trim($ap_id), $payload);
     }
 
     /**
@@ -2439,19 +1972,14 @@ class Client
      */
     public function led_override($device_id, $override_mode)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $this->request_type = 'PUT';
         if (!in_array($override_mode, ['off', 'on', 'default'])) {
             return false;
         }
 
-        $payload  = ['led_override' => $override_mode];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/device/' . trim($device_id), $payload);
+        $this->request_type = 'PUT';
+        $payload            = ['led_override' => $override_mode];
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/device/' . trim($device_id), $payload);
     }
 
     /**
@@ -2466,19 +1994,14 @@ class Client
      */
     public function locate_ap($mac, $enable)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!is_bool($enable)) {
             return false;
         }
 
-        $cmd      = (($enable) ? 'set-locate' : 'unset-locate');
-        $payload  = ['cmd' => $cmd, 'mac' => strtolower($mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
+        $cmd     = $enable ? 'set-locate' : 'unset-locate';
+        $payload = ['cmd' => $cmd, 'mac' => strtolower($mac)];
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
     }
 
     /**
@@ -2489,18 +2012,13 @@ class Client
      */
     public function site_leds($enable)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!is_bool($enable)) {
             return false;
         }
 
-        $payload  = ['led_enabled' => $enable];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/set/setting/mgmt', $payload);
+        $payload = ['led_enabled' => $enable];
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/set/setting/mgmt', $payload);
     }
 
     /**
@@ -2519,10 +2037,6 @@ class Client
      */
     public function set_ap_radiosettings($ap_id, $radio, $channel, $ht, $tx_power_mode, $tx_power)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = [
             'radio_table' => [
                 'radio'         => $radio,
@@ -2533,9 +2047,7 @@ class Client
             ]
         ];
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/upd/device/' . trim($ap_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/upd/device/' . trim($ap_id), $payload);
     }
 
     /**
@@ -2548,10 +2060,6 @@ class Client
      */
     public function set_ap_wlangroup($type_id, $device_id, $group_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!in_array($type_id, ['ng', 'na'])) {
             return false;
         }
@@ -2561,9 +2069,7 @@ class Client
             'wlangroup_id_' . $type_id => $group_id
         ];
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/upd/device/' . trim($device_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/upd/device/' . trim($device_id), $payload);
     }
 
     /**
@@ -2594,10 +2100,6 @@ class Client
         $section_id
     )
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = [
             'portal_enabled'    => $portal_enabled,
             'portal_customized' => $portal_customized,
@@ -2609,9 +2111,7 @@ class Client
             '_id'               => $section_id
         ];
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/set/setting/guest_access', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/set/setting/guest_access', $payload);
     }
 
     /**
@@ -2623,13 +2123,7 @@ class Client
      */
     public function set_guestlogin_settings_base($payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/set/setting/guest_access', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/set/setting/guest_access', $payload);
     }
 
     /**
@@ -2641,13 +2135,7 @@ class Client
      */
     public function set_ips_settings_base($payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/set/setting/ips', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/set/setting/ips', $payload);
     }
 
     /**
@@ -2661,13 +2149,7 @@ class Client
      */
     public function set_super_mgmt_settings_base($settings_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/set/setting/super_mgmt/' . trim($settings_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/set/setting/super_mgmt/' . trim($settings_id), $payload);
     }
 
     /**
@@ -2681,13 +2163,7 @@ class Client
      */
     public function set_super_smtp_settings_base($settings_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/set/setting/super_smtp/' . trim($settings_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/set/setting/super_smtp/' . trim($settings_id), $payload);
     }
 
     /**
@@ -2701,13 +2177,7 @@ class Client
      */
     public function set_super_identity_settings_base($settings_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/set/setting/super_identity/' . trim($settings_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/set/setting/super_identity/' . trim($settings_id), $payload);
     }
 
     /**
@@ -2719,14 +2189,9 @@ class Client
      */
     public function rename_ap($ap_id, $apname)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['name' => $apname];
 
-        $payload  = ['name' => $apname];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/upd/device/' . trim($ap_id), $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/upd/device/' . trim($ap_id), $payload);
     }
 
     /**
@@ -2738,14 +2203,9 @@ class Client
      */
     public function move_device($mac, $site_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['site' => $site_id, 'mac' => strtolower($mac), 'cmd' => 'move-device'];
 
-        $payload  = ['site' => $site_id, 'mac' => strtolower($mac), 'cmd' => 'move-device'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -2756,14 +2216,9 @@ class Client
      */
     public function delete_device($mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['mac' => strtolower($mac), 'cmd' => 'delete-device'];
 
-        $payload  = ['mac' => strtolower($mac), 'cmd' => 'delete-device'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/sitemgr', $payload);
     }
 
     /**
@@ -2774,13 +2229,7 @@ class Client
      */
     public function list_networkconf($network_id = '')
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id));
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id));
     }
 
     /**
@@ -2793,13 +2242,7 @@ class Client
      */
     public function create_network($payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/networkconf', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/networkconf', $payload);
     }
 
     /**
@@ -2812,14 +2255,9 @@ class Client
      */
     public function set_networksettings_base($network_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id), $payload);
     }
 
     /**
@@ -2830,14 +2268,9 @@ class Client
      */
     public function delete_network($network_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'DELETE';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id));
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id));
     }
 
     /**
@@ -2849,13 +2282,7 @@ class Client
      */
     public function list_wlanconf($wlan_id = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id));
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id));
     }
 
     /**
@@ -2899,10 +2326,6 @@ class Client
         $schedule         = []
     )
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = [
             'name'             => $name,
             'usergroup_id'     => $usergroup_id,
@@ -2927,9 +2350,7 @@ class Client
             $payload['x_passphrase'] = $x_passphrase;
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/add/wlanconf', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/add/wlanconf', $payload);
     }
 
     /**
@@ -2942,14 +2363,9 @@ class Client
      */
     public function set_wlansettings_base($wlan_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id), $payload);
     }
 
     /**
@@ -3002,14 +2418,9 @@ class Client
      */
     public function delete_wlan($wlan_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'DELETE';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id));
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id));
     }
 
     /**
@@ -3053,10 +2464,6 @@ class Client
      */
     public function list_events($historyhours = 720, $start = 0, $limit = 3000)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = [
             '_sort'  => '-time',
             'within' => intval($historyhours),
@@ -3065,9 +2472,7 @@ class Client
             '_limit' => intval($limit)
         ];
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/event', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/event', $payload);
     }
 
     /**
@@ -3077,13 +2482,7 @@ class Client
      */
     public function list_alarms()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/list/alarm');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/list/alarm');
     }
 
     /**
@@ -3094,14 +2493,9 @@ class Client
      */
     public function count_alarms($archived = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $path_suffix = $archived === false ? '?archived=false' : null;
 
-        $url_suffix = ($archived === false) ? '?archived=false' : null;
-        $response   = $this->exec_curl('/api/s/' . $this->site . '/cnt/alarm' . $url_suffix);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/cnt/alarm' . $path_suffix);
     }
 
     /**
@@ -3113,18 +2507,12 @@ class Client
      */
     public function archive_alarm($alarm_id = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload = ['cmd' => 'archive-all-alarms'];
         if (!is_null($alarm_id)) {
             $payload = ['_id' => $alarm_id, 'cmd' => 'archive-alarm'];
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/evtmgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/evtmgr', $payload);
     }
 
     /**
@@ -3138,14 +2526,9 @@ class Client
      */
     public function upgrade_device($device_mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['mac' => strtolower($device_mac)];
 
-        $payload  = ['mac' => strtolower($device_mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr/upgrade', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr/upgrade', $payload);
     }
 
     /**
@@ -3161,14 +2544,9 @@ class Client
      */
     public function upgrade_device_external($firmware_url, $device_mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['url' => filter_var($firmware_url, FILTER_SANITIZE_URL), 'mac' => strtolower($device_mac)];
 
-        $payload  = ['url' => filter_var($firmware_url, FILTER_SANITIZE_URL), 'mac' => strtolower($device_mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr/upgrade-external', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr/upgrade-external', $payload);
     }
 
     /**
@@ -3182,14 +2560,9 @@ class Client
      */
     public function start_rolling_upgrade()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
+        $payload = ['cmd' => 'set-rollupgrade'];
 
-        $payload  = ['cmd' => 'set-rollupgrade'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
-
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
     }
 
     /**
@@ -3199,14 +2572,26 @@ class Client
      */
     public function cancel_rolling_upgrade()
     {
-        if (!$this->is_loggedin) {
+        $payload = ['cmd' => 'unset-rollupgrade'];
+
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
+    }
+
+    /**
+     * List firmware versions
+     * ----------------------
+     * returns an array of firmware versions
+     * optional parameter <type> = string; "available" or "cached", determines which firmware types to return
+     */
+    public function list_firmware($type = 'available')
+    {
+        if (!in_array($type, ['available', 'cached'])) {
             return false;
         }
 
-        $payload  = ['cmd' => 'unset-rollupgrade'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
+        $payload = ['cmd' => 'list-' . $type];
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/cmd/firmware', $payload);
     }
 
     /**
@@ -3222,13 +2607,9 @@ class Client
      */
     public function power_cycle_switch_port($switch_mac, $port_idx)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-        $payload  = ['mac' => strtolower($switch_mac), 'port_idx' => intval($port_idx), 'cmd' => 'power-cycle'];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
+        $payload = ['mac' => strtolower($switch_mac), 'port_idx' => intval($port_idx), 'cmd' => 'power-cycle'];
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
     }
 
     /**
@@ -3239,14 +2620,9 @@ class Client
      */
     public function spectrum_scan($ap_mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $payload  = ['cmd' => 'spectrum-scan', 'mac' => strtolower($ap_mac)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/devmgr', $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/devmgr', $payload);
     }
 
     /**
@@ -3257,13 +2633,7 @@ class Client
      */
     public function spectrum_scan_state($ap_mac)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/stat/spectrum-scan/' . strtolower(trim($ap_mac)));
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/stat/spectrum-scan/' . strtolower(trim($ap_mac)));
     }
 
     /**
@@ -3276,14 +2646,9 @@ class Client
      */
     public function set_device_settings_base($device_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/device/' . trim($device_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/device/' . trim($device_id), $payload);
     }
 
     /**
@@ -3296,13 +2661,7 @@ class Client
      */
     public function list_radius_profiles()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/radiusprofile');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/radiusprofile');
     }
 
     /**
@@ -3315,13 +2674,7 @@ class Client
      */
     public function list_radius_accounts()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/account');
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/account');
     }
 
     /**
@@ -3367,10 +2720,6 @@ class Client
      */
     public function create_radius_account($name, $x_password, $tunnel_type, $tunnel_medium_type, $vlan = null)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $tunnel_types        = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
         $tunnel_medium_types = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         if (!in_array($tunnel_type, $tunnel_types) || !in_array($tunnel_medium_type, $tunnel_medium_types)) {
@@ -3388,9 +2737,7 @@ class Client
             $payload['vlan'] = (int) $vlan;
         }
 
-        $response = $this->exec_curl('/api/s/' . $this->site . '/rest/account', $payload);
-
-        return $this->process_response($response);
+        return $this->fetch_results('/api/s/' . $this->site . '/rest/account', $payload);
     }
 
     /**
@@ -3406,14 +2753,9 @@ class Client
      */
     public function set_radius_account_base($account_id, $payload)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'PUT';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/account/' . trim($account_id), $payload);
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/account/' . trim($account_id), $payload);
     }
 
     /**
@@ -3427,14 +2769,9 @@ class Client
      */
     public function delete_radius_account($account_id)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         $this->request_type = 'DELETE';
-        $response           = $this->exec_curl('/api/s/' . $this->site . '/rest/account/' . trim($account_id));
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/account/' . trim($account_id));
     }
 
     /**
@@ -3446,18 +2783,13 @@ class Client
      */
     public function cmd_stat($command)
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!in_array($command, ['reset-dpi'])) {
             return false;
         }
 
-        $payload  = ['cmd' => trim($command)];
-        $response = $this->exec_curl('/api/s/' . $this->site . '/cmd/stat', $payload);
+        $payload = ['cmd' => trim($command)];
 
-        return $this->process_response_boolean($response);
+        return $this->fetch_results_boolean('/api/s/' . $this->site . '/cmd/stat', $payload);
     }
 
     /****************************************************************
@@ -3578,21 +2910,16 @@ class Client
      */
     public function custom_api_request($path, $request_type = 'GET', $payload = null, $return = 'array')
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         if (!in_array($request_type, $this->request_types_allowed)) {
             return false;
         }
 
         $this->request_type = $request_type;
-        $response           = $this->exec_curl($path, $payload);
 
         if ($return === 'array') {
-            return $this->process_response($response);
+            return $this->fetch_results($path, $payload);
         } elseif ($return === 'boolean') {
-            return $this->process_response_boolean($response);
+            return $this->fetch_results_boolean($path, $payload);
         }
 
         return false;
@@ -3708,20 +3035,20 @@ class Client
      */
     public function get_cookie()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         return $this->cookies;
     }
 
     public function get_cookies()
     {
-        if (!$this->is_loggedin) {
-            return false;
-        }
-
         return $this->cookies;
+    }
+
+    /**
+     * get version of the Class
+     */
+    public function get_class_version()
+    {
+        return $this->class_version;
     }
 
     /******************************************************************
@@ -3816,32 +3143,36 @@ class Client
         return $this->connect_timeout;
     }
 
-    public function set_last_results_raw($last_results)
-    {
-        $this->last_results_raw = $last_results;
-    }
-
-    public function set_last_error_message($last_error_message)
-    {
-        $this->last_error_message = $last_error_message;
-    }
-
     /****************************************************************
      * internal (private and protected) functions from here:
      ****************************************************************/
 
     /**
-     * Process regular responses where output is the content of the data array
+     * Fetch results
+     * -------------
+     * execute the cURL request and return results
+     * required parameter <path>           = request path
+     * optional parameter <payload>        = payload to pass with the request
+     * optional parameter <boolean>        = whether the method should return a boolean result, else return
+     *                                       the "data" array
+     * optional parameter <login_required> = whether the method requires to be logged in or not
      */
-    protected function process_response($response_json)
+    protected function fetch_results($path, $payload = null, $boolean = false, $login_required = true)
     {
-        $response = json_decode($response_json);
+        /**
+         * guard clause to check if we are logged in when needed
+         */
+        if ($login_required && !$this->is_loggedin) {
+            return false;
+        }
+
+        $response = json_decode($this->exec_curl($path, $payload));
         $this->catch_json_last_error();
         $this->last_results_raw = $response;
         if (isset($response->meta->rc)) {
             if ($response->meta->rc === 'ok') {
                 $this->last_error_message = null;
-                if (is_array($response->data)) {
+                if (is_array($response->data) && !$boolean) {
                     return $response->data;
                 }
 
@@ -3854,6 +3185,7 @@ class Client
                 if (isset($response->meta->msg)) {
                     $this->last_error_message = $response->meta->msg;
                 }
+
                 if ($this->debug) {
                     trigger_error('Debug: Last error message: ' . $this->last_error_message);
                 }
@@ -3864,33 +3196,16 @@ class Client
     }
 
     /**
-     * Process responses where output should be boolean (true/false)
+     * Fetch results where output should be boolean (true/false)
+     * ---------------------------------------------------------
+     * execute the cURL request and return a boolean value
+     * required parameter <path>           = request path
+     * optional parameter <payload>        = payload to pass with the request
+     * optional parameter <login_required> = whether the method requires to be logged in or not
      */
-    protected function process_response_boolean($response_json)
+    protected function fetch_results_boolean($path, $payload = null, $login_required = true)
     {
-        $response = json_decode($response_json);
-        $this->catch_json_last_error();
-        $this->last_results_raw = $response;
-        if (isset($response->meta->rc)) {
-            if ($response->meta->rc === 'ok') {
-                $this->last_error_message = null;
-
-                return true;
-            } elseif ($response->meta->rc === 'error') {
-                /**
-                 * we have an error:
-                 * set $this->last_error_message if the returned error message is available
-                 */
-                if (isset($response->meta->msg)) {
-                    $this->last_error_message = $response->meta->msg;
-                }
-                if ($this->debug) {
-                    trigger_error('Debug: Last error message: ' . $this->last_error_message);
-                }
-            }
-        }
-
-        return false;
+        return $this->fetch_results($path, $payload, true, $login_required);
     }
 
     /**
@@ -3945,7 +3260,7 @@ class Client
                     break;
             }
 
-            if ($error !== '') {
+            if (!empty($error)) {
                 trigger_error('JSON decode error: ' . $error);
 
                 return false;
@@ -3958,10 +3273,9 @@ class Client
     /**
      * validate the submitted base URL
      */
-    private function check_base_url()
+    private function check_base_url($baseurl)
     {
-        $url_valid = filter_var($this->baseurl, FILTER_VALIDATE_URL);
-        if (!$url_valid) {
+        if (!filter_var($baseurl, FILTER_VALIDATE_URL)) {
             trigger_error('The URL provided is incomplete or invalid!');
 
             return false;
@@ -4010,7 +3324,7 @@ class Client
      */
     private function extract_csrf_token_from_cookie()
     {
-        if ($this->cookies !== '') {
+        if (!empty($this->cookies)) {
             $cookie_bits = explode('=', $this->cookies);
             if (!empty($cookie_bits) && array_key_exists(1, $cookie_bits)) {
                 $jwt = $cookie_bits[1];
@@ -4051,12 +3365,17 @@ class Client
                 $url = $this->baseurl . $path;
             }
 
-            curl_setopt($ch, CURLOPT_URL, $url);
+            /**
+             * prepare cURL options
+             */
+            $curl_options = [
+                CURLOPT_URL => $url
+            ];
 
             if ($payload !== null) {
-                curl_setopt($ch, CURLOPT_POST, true);
-                $json_payload = json_encode($payload, JSON_UNESCAPED_SLASHES);
-                curl_setopt($ch, CURLOPT_POSTFIELDS, $json_payload);
+                $json_payload                     = json_encode($payload, JSON_UNESCAPED_SLASHES);
+                $curl_options[CURLOPT_POST]       = true;
+                $curl_options[CURLOPT_POSTFIELDS] = $json_payload;
 
                 $headers = [
                     'Content-Type: application/json;charset=UTF-8',
@@ -4070,7 +3389,7 @@ class Client
                     }
                 }
 
-                curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+                $curl_options[CURLOPT_HTTPHEADER] = $headers;
 
                 /**
                  * we shouldn't be using GET (the default request type) or DELETE when passing a payload,
@@ -4081,17 +3400,19 @@ class Client
                 }
 
                 if ($this->request_type === 'PUT') {
-                    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
+                    $curl_options[CURLOPT_CUSTOMREQUEST] = 'PUT';
                 }
 
                 if ($this->request_type === 'POST') {
-                    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+                    $curl_options[CURLOPT_CUSTOMREQUEST] = 'POST';
                 }
             }
 
             if ($this->request_type === 'DELETE') {
-                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
+                $curl_options[CURLOPT_CUSTOMREQUEST] = 'DELETE';
             }
+
+            curl_setopt_array($ch, $curl_options);
 
             /**
              * execute the cURL request
@@ -4102,43 +3423,53 @@ class Client
             }
 
             /**
+             * fetch the HTTP response code
+             */
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+            /**
              * an HTTP response code 401 (Unauthorized) indicates the Cookie/Token has expired in which case
              * we need to login again.
              */
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             if ($http_code == 401) {
                 if ($this->debug) {
-                    error_log('cURL debug: needed to reconnect to UniFi controller');
+                    error_log(__FUNCTION__ . ': needed to reconnect to UniFi controller');
                 }
 
-                /**
-                 * explicitly clear the expired Cookie/Token and logging out before logging in again
-                 */
-                if (isset($_SESSION['unificookie'])) {
-                    $_SESSION['unificookie'] = '';
-                }
+                if ($this->exec_retries == 0) {
+                    /**
+                     * explicitly clear the expired Cookie/Token, update other properties and log out before logging in again
+                     */
+                    if (isset($_SESSION['unificookie'])) {
+                        $_SESSION['unificookie'] = '';
+                    }
 
-                $this->is_loggedin = false;
+                    $this->is_loggedin = false;
+                    $this->exec_retries++;
+                    curl_close($ch);
 
-                /**
-                 * then login again
-                 */
-                $this->login();
+                    /**
+                     * then login again
+                     */
+                    $this->login();
 
-                /**
-                 * when login was successful, execute the same cURL request again
-                 */
-                if ($this->is_loggedin) {
-                    $content = curl_exec($ch);
-                    if (curl_errno($ch)) {
-                        trigger_error('cURL error: ' . curl_error($ch));
-                        curl_close($ch);
+                    /**
+                     * when re-login was successful, simply execute the same cURL request again
+                     */
+                    if ($this->is_loggedin) {
+                        if ($this->debug) {
+                            error_log(__FUNCTION__ . ': re-logged in, calling exec_curl again');
+                        }
+
+                        return $this->exec_curl($path, $payload);
+                    } else {
+                        if ($this->debug) {
+                            error_log(__FUNCTION__ . ': re-login failed');
+                        }
 
                         return false;
                     }
                 } else {
-                    curl_close($ch);
-
                     return false;
                 }
             }
@@ -4183,19 +3514,24 @@ class Client
     {
         $ch = curl_init();
         if (is_resource($ch)) {
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $this->curl_ssl_verify_peer);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $this->curl_ssl_verify_host);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $this->connect_timeout);
+            $curl_options = [
+                CURLOPT_SSL_VERIFYPEER => $this->curl_ssl_verify_peer,
+                CURLOPT_SSL_VERIFYHOST => $this->curl_ssl_verify_host,
+                CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_ENCODING       => '',
+            ];
 
             if ($this->debug) {
-                curl_setopt($ch, CURLOPT_VERBOSE, true);
+                $curl_options[CURLOPT_VERBOSE] = true;
             }
 
-            if ($this->cookies != '') {
-                curl_setopt($ch, CURLOPT_COOKIESESSION, true);
-                curl_setopt($ch, CURLOPT_COOKIE, $this->cookies);
+            if (!empty($this->cookies)) {
+                $curl_options[CURLOPT_COOKIESESSION] = true;
+                $curl_options[CURLOPT_COOKIE]        = $this->cookies;
             }
+
+            curl_setopt_array($ch, $curl_options);
 
             return $ch;
         }
