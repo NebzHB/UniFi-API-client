@@ -12,7 +12,7 @@ namespace UniFi_API;
  *
  * @package UniFi_Controller_API_Client_Class
  * @author  Art of WiFi <info@artofwifi.net>
- * @version Release: 1.1.63
+ * @version Release: 1.1.68
  * @license This class is subject to the MIT license that is bundled with this package in the file LICENSE.md
  * @example This directory in the package repository contains a collection of examples:
  *          https://github.com/Art-of-WiFi/UniFi-API-client/tree/master/examples
@@ -20,26 +20,27 @@ namespace UniFi_API;
 class Client
 {
     /**
-     * protected and private properties
+     * private and protected properties
      */
-    protected $baseurl             = 'https://127.0.0.1:8443';
-    protected $user                = '';
-    protected $password            = '';
-    protected $site                = 'default';
-    protected $version             = '5.6.39';
-    protected $debug               = false;
-    protected $is_loggedin         = false;
-    protected $is_unifi_os         = false;
-    protected $exec_retries        = 0;
-    protected $class_version       = '1.1.63';
-    private $cookies               = '';
-    private $request_type          = 'GET';
-    private $request_types_allowed = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
-    private $connect_timeout       = 10;
-    private $last_results_raw      = null;
-    private $last_error_message    = null;
-    private $curl_ssl_verify_peer  = false;
-    private $curl_ssl_verify_host  = false;
+    private $class_version             = '1.1.68';
+    protected $baseurl                 = 'https://127.0.0.1:8443';
+    protected $user                    = '';
+    protected $password                = '';
+    protected $site                    = 'default';
+    protected $version                 = '6.0.43';
+    protected $debug                   = false;
+    protected $curl_ssl_verify_peer    = false;
+    protected $curl_ssl_verify_host    = false;
+    protected $is_loggedin             = false;
+    protected $is_unifi_os             = false;
+    protected $exec_retries            = 0;
+    protected $cookies                 = '';
+    protected $headers                 = [];
+    protected $request_method          = 'GET';
+    protected $request_methods_allowed = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
+    protected $connect_timeout         = 10;
+    protected $last_results_raw        = null;
+    protected $last_error_message      = null;
 
     /**
      * Construct an instance of the UniFi API client class
@@ -178,7 +179,7 @@ class Client
         /**
          * execute the cURL request and get the HTTP response code
          */
-        $content   = curl_exec($ch);
+        $response  = curl_exec($ch);
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
         if (curl_errno($ch)) {
@@ -190,7 +191,7 @@ class Client
             print PHP_EOL . '-----------LOGIN-------------' . PHP_EOL;
             print_r(curl_getinfo($ch));
             print PHP_EOL . '----------RESPONSE-----------' . PHP_EOL;
-            print $content;
+            print $response;
             print PHP_EOL . '-----------------------------' . PHP_EOL;
             print '</pre>' . PHP_EOL;
         }
@@ -205,17 +206,17 @@ class Client
             return $http_code;
         }
 
-        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-        $headers     = substr($content, 0, $header_size);
-        $body        = trim(substr($content, $header_size));
+        $response_header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $response_headers     = substr($response, 0, $response_header_size);
+        $response_body        = trim(substr($response, $response_header_size));
 
         curl_close($ch);
 
         /**
          * we are good to extract the cookies
          */
-        if ($http_code >= 200 && $http_code < 400 && !empty($body)) {
-            preg_match_all('|Set-Cookie: (.*);|Ui', $headers, $results);
+        if ($http_code >= 200 && $http_code < 400 && !empty($response_body)) {
+            preg_match_all('|Set-Cookie: (.*);|Ui', $response_headers, $results);
             if (array_key_exists(1, $results)) {
                 $this->cookies = implode(';', $results[1]);
 
@@ -260,19 +261,16 @@ class Client
         /**
          * constuct HTTP request headers as required
          */
-        $headers     = ['content-length: 0'];
-        $logout_path = '/logout';
+        $this->headers = ['content-length: 0'];
+        $logout_path   = '/logout';
         if ($this->is_unifi_os) {
             $logout_path = '/api/auth/logout';
             $curl_options[CURLOPT_CUSTOMREQUEST] = 'POST';
 
-            $csrf_token = $this->extract_csrf_token_from_cookie();
-            if ($csrf_token) {
-                $headers[] = 'x-csrf-token: ' . $csrf_token;
-            }
+            $this->create_x_csrf_token_header();
         }
 
-        $curl_options[CURLOPT_HTTPHEADER] = $headers;
+        $curl_options[CURLOPT_HTTPHEADER] = $this->headers;
         $curl_options[CURLOPT_URL]        = $this->baseurl . $logout_path;
 
         curl_setopt_array($ch, $curl_options);
@@ -316,19 +314,19 @@ class Client
         /**
          * if we have received values for up/down/megabytes/ap_mac we append them to the payload array to be submitted
          */
-        if (!is_null($up)) {
+        if (!empty($up)) {
             $payload['up'] = intval($up);
         }
 
-        if (!is_null($down)) {
+        if (!empty($down)) {
             $payload['down'] = intval($down);
         }
 
-        if (!is_null($megabytes)) {
+        if (!empty($megabytes)) {
             $payload['bytes'] = intval($megabytes);
         }
 
-        if (!is_null($ap_mac)) {
+        if (!empty($ap_mac) && filter_var($ap_mac, FILTER_VALIDATE_MAC)) {
             $payload['ap_mac'] = strtolower($ap_mac);
         }
 
@@ -1111,8 +1109,12 @@ class Client
             return false;
         }
 
-        $this->request_type = 'PUT';
-        $payload            = ['_id' => $client_id, 'use_fixedip' => $use_fixedip];
+        $this->request_method = 'PUT';
+        $payload = [
+            '_id'         => $client_id,
+            'use_fixedip' => $use_fixedip
+        ];
+
         if ($use_fixedip) {
             if ($network_id) {
                 $payload['network_id'] = $network_id;
@@ -1163,7 +1165,7 @@ class Client
      */
     public function edit_usergroup($group_id, $site_id, $group_name, $group_dn = -1, $group_up = -1)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
         $payload = [
             '_id'               => $group_id,
             'name'              => $group_name,
@@ -1183,7 +1185,7 @@ class Client
      */
     public function delete_usergroup($group_id)
     {
-        $this->request_type = 'DELETE';
+        $this->request_method = 'DELETE';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/usergroup/' . trim($group_id));
     }
@@ -1191,7 +1193,7 @@ class Client
     /**
      * Fetch AP groups
      *
-     * @return array returns an array containing the current AP groups on success
+     * @return array  containing the current AP groups on success
      */
     public function list_apgroups()
     {
@@ -1223,7 +1225,7 @@ class Client
      */
     public function edit_apgroup($group_id, $group_name, $device_macs)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
         $payload = [
             '_id'            => $group_id,
             'attr_no_delete' => false,
@@ -1242,7 +1244,7 @@ class Client
      */
     public function delete_apgroup($group_id)
     {
-        $this->request_type = 'DELETE';
+        $this->request_method = 'DELETE';
 
         return $this->fetch_results_boolean('/v2/api/site/' . $this->site . '/apgroups/' . trim($group_id));
     }
@@ -1253,7 +1255,7 @@ class Client
      * @param  string $group_id optional, _id value of the single firewall group to list
      * @return array            containing the current firewall groups or the selected firewall group on success
      */
-    public function list_firewallgroups($group_id = null)
+    public function list_firewallgroups($group_id = '')
     {
         return $this->fetch_results('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id));
     }
@@ -1296,7 +1298,7 @@ class Client
             return false;
         }
 
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
         $payload = [
             '_id'           => $group_id,
             'name'          => $group_name,
@@ -1316,7 +1318,7 @@ class Client
      */
     public function delete_firewallgroup($group_id)
     {
-        $this->request_type = 'DELETE';
+        $this->request_method = 'DELETE';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/firewallgroup/' . trim($group_id));
     }
@@ -1523,7 +1525,7 @@ class Client
      */
     public function set_site_country($country_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/country/' . trim($country_id), $payload);
     }
@@ -1542,7 +1544,7 @@ class Client
      */
     public function set_site_locale($locale_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/locale/' . trim($locale_id), $payload);
     }
@@ -1558,7 +1560,7 @@ class Client
      */
     public function set_site_snmp($snmp_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/snmp/' . trim($snmp_id), $payload);
     }
@@ -1574,7 +1576,7 @@ class Client
      */
     public function set_site_mgmt($mgmt_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/mgmt/' . trim($mgmt_id), $payload);
     }
@@ -1590,7 +1592,7 @@ class Client
      */
     public function set_site_guest_access($guest_access_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/guest_access/' . trim($guest_access_id), $payload);
     }
@@ -1606,7 +1608,7 @@ class Client
      */
     public function set_site_ntp($ntp_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/ntp/' . trim($ntp_id), $payload);
     }
@@ -1622,7 +1624,7 @@ class Client
      */
     public function set_site_connectivity($connectivity_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/setting/connectivity/' . trim($connectivity_id), $payload);
     }
@@ -1630,7 +1632,7 @@ class Client
     /**
      * Fetch admins
      *
-     * @return array containing administrator objects for selected site
+     * @return array  containing administrator objects for selected site
      */
     public function list_admins()
     {
@@ -1642,7 +1644,7 @@ class Client
     /**
      * Fetch all admins
      *
-     * @return array containing administrator objects for all sites
+     * @return array  containing administrator objects for all sites
      */
     public function list_all_admins()
     {
@@ -1770,7 +1772,7 @@ class Client
     /**
      * Fetch wlan_groups
      *
-     * @return array containing known wlan_groups
+     * @return array  containing known wlan_groups
      */
     public function list_wlan_groups()
     {
@@ -1780,7 +1782,7 @@ class Client
     /**
      * Fetch sysinfo
      *
-     * @return array containing known sysinfo data
+     * @return array  containing known sysinfo data
      */
     public function stat_sysinfo()
     {
@@ -1790,8 +1792,8 @@ class Client
     /**
      * Fetch controller status
      *
-     * NOTES: in order to get useful results (e.g. controller version) you can call get_last_results_raw()
-     * immediately after this method
+     * NOTES:
+     * login not required
      *
      * @return bool true upon success (controller is online)
      */
@@ -1801,9 +1803,39 @@ class Client
     }
 
     /**
+     * Fetch full controller status
+     *
+     * NOTES:
+     * login not required
+     *
+     * @return bool|array  staus array upon success, false upon failure
+     */
+    public function stat_full_status()
+    {
+        $this->fetch_results_boolean('/status', null, false);
+
+        return json_decode($this->get_last_results_raw());
+    }
+
+    /**
+     * Fetch device name mappings
+     *
+     * NOTES:
+     * login not required
+     *
+     * @return bool|array  mappings array upon success, false upon failure
+     */
+    public function list_device_name_mappings()
+    {
+        $this->fetch_results_boolean('/dl/firmware/bundles.json', null, false);
+
+        return json_decode($this->get_last_results_raw());
+    }
+
+    /**
      * Fetch self
      *
-     * @return array containing information about the logged in user
+     * @return array  containing information about the logged in user
      */
     public function list_self()
     {
@@ -1818,7 +1850,7 @@ class Client
      */
     public function stat_voucher($create_time = null)
     {
-        $payload = trim($create_time) != null ? ['create_time' => intval($create_time)] : [];
+        $payload = isset($create_time) ? ['create_time' => intval($create_time)] : [];
 
         return $this->fetch_results('/api/s/' . $this->site . '/stat/voucher', $payload);
     }
@@ -1831,7 +1863,7 @@ class Client
      */
     public function stat_payment($within = null)
     {
-        $path_suffix = $within != null ? '?within=' . intval($within) : '';
+        $path_suffix = isset($within) ? '?within=' . intval($within) : '';
 
         return $this->fetch_results('/api/s/' . $this->site . '/stat/payment' . $path_suffix);
     }
@@ -1847,7 +1879,7 @@ class Client
     public function create_hotspotop($name, $x_password, $note = null)
     {
         $payload = ['name' => $name, 'x_password' => $x_password];
-        if (!is_null($note)) {
+        if (!isset($note)) {
             $payload['note'] = trim($note);
         }
 
@@ -1857,7 +1889,7 @@ class Client
     /**
      * Fetch hotspot operators (using REST)
      *
-     * @return array containing hotspot operators
+     * @return array  containing hotspot operators
      */
     public function list_hotspotop()
     {
@@ -1872,7 +1904,7 @@ class Client
      * @param  int    $minutes   minutes the voucher is valid after activation (expiration time)
      * @param  int    $count     number of vouchers to create, default value is 1
      * @param  int    $quota     single-use or multi-use vouchers, value '0' is for multi-use, '1' is for single-use,
-       *                         'n' is for multi-use n times
+     *                           'n' is for multi-use n times
      * @param  string $note      note text to add to voucher when printing
      * @param  int    $up        upload speed limit in kbps
      * @param  int    $down      download speed limit in kbps
@@ -1881,11 +1913,11 @@ class Client
      */
     public function create_voucher(
         $minutes,
-        $count  = 1,
-        $quota  = 0,
-        $note   = null,
-        $up     = null,
-        $down   = null,
+        $count     = 1,
+        $quota     = 0,
+        $note      = null,
+        $up        = null,
+        $down      = null,
         $megabytes = null
     ) {
         $payload = [
@@ -1943,7 +1975,7 @@ class Client
     /**
      * Fetch port forwarding stats
      *
-     * @return array containing port forwarding stats
+     * @return array  containing port forwarding stats
      */
     public function list_portforward_stats()
     {
@@ -1953,7 +1985,7 @@ class Client
     /**
      * Fetch DPI stats
      *
-     * @return array containing DPI stats
+     * @return array  containing DPI stats
      */
     public function list_dpi_stats()
     {
@@ -1987,7 +2019,7 @@ class Client
     /**
      * Fetch current channels
      *
-     * @return array containing currently allowed channels
+     * @return array  containing currently allowed channels
      */
     public function list_current_channels()
     {
@@ -2001,7 +2033,7 @@ class Client
      * these codes following the ISO standard:
      * https://en.wikipedia.org/wiki/ISO_3166-1_numeric
      *
-     * @return array containing available country codes
+     * @return array  containing available country codes
      */
     public function list_country_codes()
     {
@@ -2011,7 +2043,7 @@ class Client
     /**
      * Fetch port forwarding settings
      *
-     * @return array containing port forwarding settings
+     * @return array  containing port forwarding settings
      */
     public function list_portforwarding()
     {
@@ -2021,7 +2053,7 @@ class Client
     /**
      * Fetch port configurations
      *
-     * @return array containing port configurations
+     * @return array  containing port configurations
      */
     public function list_portconf()
     {
@@ -2031,7 +2063,7 @@ class Client
     /**
      * Fetch VoIP extensions
      *
-     * @return array containing VoIP extensions
+     * @return array  containing VoIP extensions
      */
     public function list_extension()
     {
@@ -2041,7 +2073,7 @@ class Client
     /**
      * Fetch site settings
      *
-     * @return array containing site configuration settings
+     * @return array  containing site configuration settings
      */
     public function list_settings()
     {
@@ -2128,7 +2160,7 @@ class Client
             return false;
         }
 
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
         $payload            = ['disabled' => $disable];
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/device/' . trim($ap_id), $payload);
@@ -2152,8 +2184,8 @@ class Client
             return false;
         }
 
-        $this->request_type = 'PUT';
-        $payload            = ['led_override' => $override_mode];
+        $this->request_method = 'PUT';
+        $payload              = ['led_override' => $override_mode];
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/device/' . trim($device_id), $payload);
     }
@@ -2399,7 +2431,7 @@ class Client
     /**
      * Fetch dynamic DNS settings (using REST)
      *
-     * @return array containing dynamic DNS settings
+     * @return array  containing dynamic DNS settings
      */
     public function list_dynamicdns()
     {
@@ -2428,7 +2460,7 @@ class Client
      */
     public function set_dynamicdns($dynamicdns_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/dynamicdns/' . trim($dynamicdns_id), $payload);
     }
@@ -2466,7 +2498,7 @@ class Client
      */
     public function set_networksettings_base($network_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id), $payload);
     }
@@ -2479,7 +2511,7 @@ class Client
      */
     public function delete_network($network_id)
     {
-        $this->request_type = 'DELETE';
+        $this->request_method = 'DELETE';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/networkconf/' . trim($network_id));
     }
@@ -2577,7 +2609,7 @@ class Client
      */
     public function set_wlansettings_base($wlan_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id), $payload);
     }
@@ -2630,7 +2662,7 @@ class Client
      */
     public function delete_wlan($wlan_id)
     {
-        $this->request_type = 'DELETE';
+        $this->request_method = 'DELETE';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/wlanconf/' . trim($wlan_id));
     }
@@ -2703,7 +2735,8 @@ class Client
     /**
      * Count alarms
      *
-     * @param  bool  $archived if true all alarms are counted, if false only non-archived (active) alarms are counted
+     * @param  bool  $archived optional, if true all alarms are counted, if false only non-archived (active) alarms are counted,
+     *                         by default all alarms are counted
      * @return array           containing the alarm count
      */
     public function count_alarms($archived = null)
@@ -2716,7 +2749,8 @@ class Client
     /**
      * Archive alarms(s)
      *
-     * @param  string $alarm_id _id of the alarm to archive which can be found with the list_alarms() function,
+     * @param  string $alarm_id optional, _id of the alarm to archive which can be found with the list_alarms() function,
+     *                          by default all alarms are archived
      * @return bool             true on success
      */
     public function archive_alarm($alarm_id = null)
@@ -2823,7 +2857,8 @@ class Client
     /**
      * Fetch firmware versions
      *
-     * @param  string $type "available" or "cached", determines which firmware types to return
+     * @param  string $type optional, "available" or "cached", determines which firmware types to return,
+     *                      default value is "available"
      * @return array        containing firmware versions
      */
     public function list_firmware($type = 'available')
@@ -2889,7 +2924,7 @@ class Client
      */
     public function set_device_settings_base($device_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/device/' . trim($device_id), $payload);
     }
@@ -2996,7 +3031,7 @@ class Client
      */
     public function set_radius_account_base($account_id, $payload)
     {
-        $this->request_type = 'PUT';
+        $this->request_method = 'PUT';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/account/' . trim($account_id), $payload);
     }
@@ -3012,7 +3047,7 @@ class Client
      */
     public function delete_radius_account($account_id)
     {
-        $this->request_type = 'DELETE';
+        $this->request_method = 'DELETE';
 
         return $this->fetch_results_boolean('/api/s/' . $this->site . '/rest/account/' . trim($account_id));
     }
@@ -3036,7 +3071,7 @@ class Client
     }
 
     /**
-    * Toggle Element Adoption ON or OFF
+     * Toggle Element Adoption ON or OFF
      *
      * @param  bool $enable true enables Element Adoption, false disables Element Adoption
      * @return bool         true on success
@@ -3058,16 +3093,16 @@ class Client
      * NOTE:
      * Only use this method when you fully understand the behavior of the UniFi controller API. No input validation is performed, to be used with care!
      *
-     * @param  string       $path         suffix of the URL (following the port number) to pass request to, *must* start with a "/" character
-     * @param  string       $request_type optional, HTTP request type, can be GET (default), POST, PUT, PATCH, or DELETE
-     * @param  object|array $payload      optional, stdClass object or associative array containing the payload to pass
-     * @param  string       $return       optional, string; determines how to return results, when "boolean" the method must return a
-     *                                    boolean result (true/false) or "array" when the method must return an array
-     * @return bool|array                 returns results as requested, returns false on incorrect parameters
+     * @param  string       $path           suffix of the URL (following the port number) to pass request to, *must* start with a "/" character
+     * @param  string       $request_method optional, HTTP request type, can be GET (default), POST, PUT, PATCH, or DELETE
+     * @param  object|array $payload        optional, stdClass object or associative array containing the payload to pass
+     * @param  string       $return         optional, string; determines how to return results, when "boolean" the method must return a
+     *                                      boolean result (true/false) or "array" when the method must return an array
+     * @return bool|array                   returns results as requested, returns false on incorrect parameters
      */
-    public function custom_api_request($path, $request_type = 'GET', $payload = null, $return = 'array')
+    public function custom_api_request($path, $request_method = 'GET', $payload = null, $return = 'array')
     {
-        if (!in_array($request_type, $this->request_types_allowed)) {
+        if (!in_array($request_method, $this->request_methods_allowed)) {
             return false;
         }
 
@@ -3075,7 +3110,7 @@ class Client
             return false;
         }
 
-        $this->request_type = $request_type;
+        $this->request_method = $request_method;
 
         if ($return === 'array') {
             return $this->fetch_results($path, $payload);
@@ -3310,6 +3345,7 @@ class Client
      * Get version of the Class
      *
      * @return string semver compatible version of this class
+     *                https://semver.org/
      */
     public function get_class_version()
     {
@@ -3331,29 +3367,29 @@ class Client
     }
 
     /**
-     * Get current request type
+     * Get current request method
      *
      * @return string request type
      */
-    public function get_request_type()
+    public function get_request_method()
     {
-        return $this->request_type;
+        return $this->request_method;
     }
 
     /**
-     * Set request type
+     * Set request method
      *
-     * @param string $request_type a valid HTTP request type
-     * @return bool                whether request was successful or not
+     * @param  string $request_method a valid HTTP request method
+     * @return bool                   whether request was successful or not
      */
-    public function set_request_type($request_type)
+    public function set_request_method($request_method)
     {
 
-        if (!in_array($request_type, $this->request_types_allowed)) {
+        if (!in_array($request_method, $this->request_methods_allowed)) {
             return false;
         }
 
-        $this->request_type = $request_type;
+        $this->request_method = $request_method;
 
         return true;
     }
@@ -3387,7 +3423,6 @@ class Client
 
         return true;
     }
-
 
     /**
      * Get value for cURL option CURLOPT_SSL_VERIFYHOST
@@ -3467,7 +3502,7 @@ class Client
     }
 
     /****************************************************************
-     * internal (private and protected) functions from here:
+     * private and protected functions from here:
      ****************************************************************/
 
     /**
@@ -3491,44 +3526,48 @@ class Client
             return false;
         }
 
-        $response = json_decode($this->exec_curl($path, $payload));
-        $this->catch_json_last_error();
-        $this->last_results_raw = $response;
-        if (isset($response->meta->rc)) {
-            if ($response->meta->rc === 'ok') {
-                $this->last_error_message = null;
-                if (is_array($response->data) && !$boolean) {
-                    return $response->data;
-                }
+        $this->last_results_raw = $this->exec_curl($path, $payload);
 
-                return true;
-            } elseif ($response->meta->rc === 'error') {
-                /**
-                 * we have an error:
-                 * set $this->set last_error_message if the returned error message is available
-                 */
-                if (isset($response->meta->msg)) {
-                    $this->last_error_message = $response->meta->msg;
-                    if ($this->debug) {
-                        trigger_error('Debug: Last error message: ' . $this->last_error_message);
+        if (is_string($this->last_results_raw)) {
+            $response = json_decode($this->last_results_raw);
+            $this->catch_json_last_error();
+
+            if (isset($response->meta->rc)) {
+                if ($response->meta->rc === 'ok') {
+                    $this->last_error_message = null;
+                    if (is_array($response->data) && !$boolean) {
+                        return $response->data;
+                    }
+
+                    return true;
+                } elseif ($response->meta->rc === 'error') {
+                    /**
+                     * we have an error:
+                     * set $this->set last_error_message if the returned error message is available
+                     */
+                    if (isset($response->meta->msg)) {
+                        $this->last_error_message = $response->meta->msg;
+                        if ($this->debug) {
+                            trigger_error('Debug: Last error message: ' . $this->last_error_message);
+                        }
                     }
                 }
             }
-        }
 
-        /**
-         * to deal with a response coming from the new v2 API
-         */
-        if (strpos($path, '/v2/api/') === 0) {
-            if (isset($response->errorCode)) {
-                if (isset($response->message)) {
-                    $this->last_error_message = $response->message;
-                    if ($this->debug) {
-                        trigger_error('Debug: Last error message: ' . $this->last_error_message);
+            /**
+             * to deal with a response coming from the new v2 API
+             */
+            if (strpos($path, '/v2/api/') === 0) {
+                if (isset($response->errorCode)) {
+                    if (isset($response->message)) {
+                        $this->last_error_message = $response->message;
+                        if ($this->debug) {
+                            trigger_error('Debug: Last error message: ' . $this->last_error_message);
+                        }
                     }
+                } else {
+                    return $response;
                 }
-            } else {
-                return $response;
             }
         }
 
@@ -3555,7 +3594,7 @@ class Client
      *
      * @return bool returns true upon success, false upon failure
      */
-    private function catch_json_last_error()
+    protected function catch_json_last_error()
     {
         if ($this->debug) {
             switch (json_last_error()) {
@@ -3617,7 +3656,7 @@ class Client
      * @param  string $baseurl the base URL to validate
      * @return bool            true if base URL is a valid URL, else returns false
      */
-    private function check_base_url($baseurl)
+    protected function check_base_url($baseurl)
     {
         if (!filter_var($baseurl, FILTER_VALIDATE_URL) || substr($baseurl, -1) === '/') {
             trigger_error('The URL provided is incomplete, invalid or ends with a / character!');
@@ -3634,7 +3673,7 @@ class Client
      * @param  string $site the (short) site name to check
      * @return bool         true if (short) site name is valid, else returns false
      */
-    private function check_site($site)
+    protected function check_site($site)
     {
         if ($this->debug && preg_match("/\s/", $site)) {
             trigger_error('The provided (short) site name may not contain any spaces');
@@ -3651,9 +3690,9 @@ class Client
     /**
      * Update the unificookie if sessions are enabled
      *
-     * @return bool true when unificookie was updated, else return false
+     * @return bool true when unificookie was updated, else returns false
      */
-    private function update_unificookie()
+    protected function update_unificookie()
     {
         if (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['unificookie']) && !empty($_SESSION['unificookie'])) {
             $this->cookies = $_SESSION['unificookie'];
@@ -3672,11 +3711,11 @@ class Client
     }
 
     /**
-     * Extract the CSRF token from our Cookie string
+     * Add a header containing the CSRF token from our Cookie string
      *
-     * @return bool|string the CSRF token upon success or false when unable to extract the CSRF token
+     * @return bool true upon success or false when unable to extract the CSRF token
      */
-    private function extract_csrf_token_from_cookie()
+    protected function create_x_csrf_token_header()
     {
         if (!empty($this->cookies)) {
             $cookie_bits = explode('=', $this->cookies);
@@ -3693,7 +3732,9 @@ class Client
                 return false;
             }
 
-            return json_decode(base64_decode($jwt_payload))->csrfToken;
+            $this->headers[] = 'x-csrf-token: ' . json_decode(base64_decode($jwt_payload))->csrfToken;
+
+            return true;
         }
 
         return false;
@@ -3704,25 +3745,22 @@ class Client
      *
      * @param  string       $path    path for the request
      * @param  object|array $payload optional, payload to pass with the request
-     * @return bool|array            response returned by the controller API
+     * @return bool|array|string     response returned by the controller API, false upon error
      */
     protected function exec_curl($path, $payload = null)
     {
-        if (!in_array($this->request_type, $this->request_types_allowed)) {
-            trigger_error('an invalid HTTP request type was used: ' . $this->request_type);
+        if (!in_array($this->request_method, $this->request_methods_allowed)) {
+            trigger_error('an invalid HTTP request type was used: ' . $this->request_method);
         }
 
         if (!($ch = $this->get_curl_resource())) {
-            trigger_error('$ch as returned by get_curl_resource() is not a resource');
+            trigger_error('get_curl_resource() did not return a resource');
 
             return false;
         }
 
-        /**
-         * assigne default values to these vars
-         */
-        $json_payload = '';
-        $headers      = [];
+        $this->headers = [];
+        $json_payload  = '';
 
         if ($this->is_unifi_os) {
             $url = $this->baseurl . '/proxy/network' . $path;
@@ -3740,12 +3778,11 @@ class Client
         /**
          * what we do when a payload is passed
          */
-        if (!is_null($payload)) {
+        if (!empty($payload)) {
             $json_payload                     = json_encode($payload, JSON_UNESCAPED_SLASHES);
-            $curl_options[CURLOPT_POST]       = true;
             $curl_options[CURLOPT_POSTFIELDS] = $json_payload;
 
-            $headers = [
+            $this->headers = [
                 'content-type: application/json',
                 'content-length: ' . strlen($json_payload)
             ];
@@ -3754,35 +3791,32 @@ class Client
              * we shouldn't be using GET (the default request type) or DELETE when passing a payload,
              * switch to POST instead
              */
-            if ($this->request_type === 'GET' || $this->request_type === 'DELETE') {
-                $this->request_type = 'POST';
+            if ($this->request_method === 'GET' || $this->request_method === 'DELETE') {
+                $this->request_method = 'POST';
             }
         }
 
-        switch ($this->request_type) {
-            case 'DELETE':
-                $curl_options[CURLOPT_CUSTOMREQUEST] = 'DELETE';
-                break;
-            case 'PATCH':
-                $curl_options[CURLOPT_CUSTOMREQUEST] = 'PATCH';
-                break;
+        switch ($this->request_method) {
             case 'POST':
                 $curl_options[CURLOPT_CUSTOMREQUEST] = 'POST';
+                break;
+            case 'DELETE':
+                $curl_options[CURLOPT_CUSTOMREQUEST] = 'DELETE';
                 break;
             case 'PUT':
                 $curl_options[CURLOPT_CUSTOMREQUEST] = 'PUT';
                 break;
+            case 'PATCH':
+                $curl_options[CURLOPT_CUSTOMREQUEST] = 'PATCH';
+                break;
         }
 
-        if ($this->is_unifi_os && $this->request_type !== 'GET') {
-            $csrf_token = $this->extract_csrf_token_from_cookie();
-            if ($csrf_token) {
-                $headers[] = 'x-csrf-token: ' . $csrf_token;
-            }
+        if ($this->is_unifi_os && $this->request_method !== 'GET') {
+            $this->create_x_csrf_token_header();
         }
 
-        if (count($headers) > 0) {
-            $curl_options[CURLOPT_HTTPHEADER] = $headers;
+        if (count($this->headers) > 0) {
+            $curl_options[CURLOPT_HTTPHEADER] = $this->headers;
         }
 
         curl_setopt_array($ch, $curl_options);
@@ -3790,7 +3824,7 @@ class Client
         /**
          * execute the cURL request
          */
-        $content = curl_exec($ch);
+        $response = curl_exec($ch);
         if (curl_errno($ch)) {
             trigger_error('cURL error: ' . curl_error($ch));
         }
@@ -3858,7 +3892,7 @@ class Client
             }
 
             print PHP_EOL . '----------RESPONSE-----------' . PHP_EOL;
-            print $content;
+            print $response;
             print PHP_EOL . '-----------------------------' . PHP_EOL;
             print '</pre>' . PHP_EOL;
         }
@@ -3866,23 +3900,24 @@ class Client
         curl_close($ch);
 
         /**
-         * set request_type value back to default, just in case
+         * set request_method value back to default, just in case
          */
-        $this->request_type = 'GET';
+        $this->request_method = 'GET';
 
-        return $content;
+        return $response;
     }
 
     /**
      * Create a new cURL resource and return a cURL handle
      *
-     * @return object|bool cURL handle upon success, false upon failure
+     * @return object|bool|resource cURL handle upon success, false upon failure
      */
     protected function get_curl_resource()
     {
         $ch = curl_init();
         if (is_object($ch) || is_resource($ch)) {
             $curl_options = [
+                CURLOPT_PROTOCOLS      => CURLPROTO_HTTPS | CURLPROTO_HTTP,
                 CURLOPT_SSL_VERIFYPEER => $this->curl_ssl_verify_peer,
                 CURLOPT_SSL_VERIFYHOST => $this->curl_ssl_verify_host,
                 CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
